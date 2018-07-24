@@ -42,6 +42,8 @@ interface LookupTracker {
 }
 
 enum class ScopeKind {
+    // Please, do not add more than 127 enum entries
+    // We assume in org.jetbrains.kotlin.daemon.RemoteLookupTrackerClient.record that `ScopeKind::ordinal` fits in byte
     PACKAGE,
     CLASSIFIER
 }

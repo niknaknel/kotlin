@@ -25,12 +25,32 @@ import org.jetbrains.kotlin.incremental.components.LookupInfo
 import org.jetbrains.kotlin.incremental.components.LookupTracker
 import org.jetbrains.kotlin.incremental.components.Position
 import org.jetbrains.kotlin.incremental.components.ScopeKind
+import org.jetbrains.kotlin.name.FqName
 
 
-class RemoteLookupTrackerClient(val facade: CompilerCallbackServicesFacade, eventManager: EventManager, val profiler: Profiler = DummyProfiler()) : LookupTracker {
+class RemoteLookupTrackerClient(
+    val facade: CompilerCallbackServicesFacade,
+    eventManager: EventManager,
+    val profiler: Profiler = DummyProfiler()
+) : LookupTracker {
     private val isDoNothing = profiler.withMeasure(this) { facade.lookupTracker_isDoNothing() }
 
-    private val lookups = THashSet<LookupInfo>()
+    private data class CompressedLookupInfo(
+        val filePath: String,
+        val symbolFqName: String,
+        val scopeKind: Byte
+    ) {
+        fun toLookupInfo(): LookupInfo {
+            val fqName = FqName(symbolFqName)
+            assert(!fqName.isRoot) { "CompressedLookupInfo::symbolFqName should not be a root" }
+
+            val scopeKind = ScopeKind.values()[scopeKind.toInt()]
+
+            return LookupInfo(filePath, Position.NO_POSITION, fqName.parent().asString(), scopeKind, fqName.shortName().asString())
+        }
+    }
+
+    private val lookups = THashSet<Any>()
     private val interner = StringInterner()
 
     override val requiresPosition: Boolean = profiler.withMeasure(this) { facade.lookupTracker_requiresPosition() }
@@ -38,11 +58,17 @@ class RemoteLookupTrackerClient(val facade: CompilerCallbackServicesFacade, even
     override fun record(filePath: String, position: Position, scopeFqName: String, scopeKind: ScopeKind, name: String) {
         if (isDoNothing) return
 
-        val internedFilePath = interner.intern(filePath)
-        val internedScopeFqName = interner.intern(scopeFqName)
-        val internedName = interner.intern(name)
+        if (requiresPosition) {
+            // Do not perform any optimizations when `requiresPosition` is true
+            // Currently, it's only used for tests
+            lookups.add(LookupInfo(filePath, position, scopeFqName, scopeKind, name))
+            return
+        }
 
-        lookups.add(LookupInfo(internedFilePath, position, internedScopeFqName, scopeKind, internedName))
+        val internedFilePath = interner.intern(filePath)
+        val internedSymbolFqName = interner.intern("$scopeFqName.$name")
+
+        lookups.add(CompressedLookupInfo(internedFilePath, internedSymbolFqName, scopeKind.ordinal.toByte()))
     }
 
     init {
@@ -53,7 +79,14 @@ class RemoteLookupTrackerClient(val facade: CompilerCallbackServicesFacade, even
         if (isDoNothing || lookups.isEmpty()) return
 
         profiler.withMeasure(this) {
-            facade.lookupTracker_record(lookups)
+            facade.lookupTracker_record(
+                lookups.map {
+                    if (requiresPosition)
+                        it as LookupInfo
+                    else
+                        (it as CompressedLookupInfo).toLookupInfo()
+                }
+            )
         }
 
         lookups.clear()
